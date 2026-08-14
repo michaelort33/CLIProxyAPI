@@ -857,6 +857,8 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 // cli-chat-proxy ("Usage resets over a rolling 24-hour window").
 const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
 
+const xaiContextLengthErrorBody = `{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","type":"invalid_request_error","param":"input","code":"context_length_exceeded"}}`
+
 // xaiStatusErr normalizes upstream xAI error bodies for conductor behavior:
 //   - credential invalidation (403 bad-credentials) is remapped to 401 so the
 //     existing OAuth refresh-once-and-retry path runs instead of payment cooldown
@@ -867,6 +869,10 @@ const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
 func xaiStatusErr(code int, body []byte) statusErr {
 	err := statusErr{code: code, msg: string(body)}
 	if len(body) == 0 {
+		return err
+	}
+	if code == http.StatusBadRequest && isXAIContextLengthBody(body) {
+		err.msg = xaiContextLengthErrorBody
 		return err
 	}
 	if code == http.StatusForbidden && isXAIBadCredentialsBody(body) {
@@ -890,6 +896,19 @@ func xaiStatusErr(code int, body []byte) statusErr {
 		err.retryAfter = &d
 	}
 	return err
+}
+
+func isXAIContextLengthBody(body []byte) bool {
+	for _, path := range []string{"error", "error.message", "message"} {
+		message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, path).String()))
+		if message == "input token limit exceeded" ||
+			strings.Contains(message, "maximum prompt length") &&
+				strings.Contains(message, "request contains") &&
+				strings.Contains(message, "tokens") {
+			return true
+		}
+	}
+	return false
 }
 
 // isXAIBadCredentialsBody reports whether an xAI error body indicates an
