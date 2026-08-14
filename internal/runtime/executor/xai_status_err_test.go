@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -37,6 +38,68 @@ func TestXAIStatusErr_Non429Unchanged(t *testing.T) {
 	}
 	if err.RetryAfter() != nil {
 		t.Fatalf("expected nil RetryAfter for 400, got %v", *err.RetryAfter())
+	}
+}
+
+func TestXAIStatusErr_ContextLengthUsesOpenAIErrorShape(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "prompt length details",
+			body: `{"code":"invalid-argument","error":"This model's maximum prompt length is 500000 but the request contains 627264 tokens."}`,
+		},
+		{
+			name: "input token limit",
+			body: `{"code":"invalid-argument","error":"Input token limit exceeded"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := xaiStatusErr(http.StatusBadRequest, []byte(test.body))
+			if err.StatusCode() != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", err.StatusCode())
+			}
+
+			var response struct {
+				Error struct {
+					Message string `json:"message"`
+					Type    string `json:"type"`
+					Param   string `json:"param"`
+					Code    string `json:"code"`
+				} `json:"error"`
+			}
+			if errUnmarshal := json.Unmarshal([]byte(err.Error()), &response); errUnmarshal != nil {
+				t.Fatalf("error body is not JSON: %v", errUnmarshal)
+			}
+			if response.Error.Type != "invalid_request_error" {
+				t.Fatalf("type = %q, want invalid_request_error", response.Error.Type)
+			}
+			if response.Error.Param != "input" {
+				t.Fatalf("param = %q, want input", response.Error.Param)
+			}
+			if response.Error.Code != "context_length_exceeded" {
+				t.Fatalf("code = %q, want context_length_exceeded", response.Error.Code)
+			}
+			if response.Error.Message == "" {
+				t.Fatal("expected a non-empty message")
+			}
+		})
+	}
+}
+
+func TestXAIStatusErr_UnrelatedBadRequestsRemainUnchanged(t *testing.T) {
+	tests := []string{
+		`{"code":"invalid-argument","error":"Invalid tool schema"}`,
+		`{"error":{"message":"Invalid 'input[4].call_id': string too long.","type":"invalid_request_error","code":"string_above_max_length"}}`,
+	}
+	for _, body := range tests {
+		err := xaiStatusErr(http.StatusBadRequest, []byte(body))
+		if err.Error() != body {
+			t.Fatalf("body changed:\n got: %s\nwant: %s", err.Error(), body)
+		}
 	}
 }
 
